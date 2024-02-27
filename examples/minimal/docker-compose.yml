@@ -1,0 +1,18 @@
+version: "3"
+
+services:
+  principal:
+    container_name: principal
+    command: --port 8080 --threshold 10 --container http-echo --debug
+    build:
+      context: ../../
+    ports:
+      - 8080:8080
+
+  http-echo:
+    container_name: http-echo
+    image: hashicorp/http-echo
+    command: -listen=:8080 -text="hello world"
+    depends_on:
+      - principal
+    network_mode: service:principal
