@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use duration_string::DurationString;
 use pcap::Device;
+use tokio::{task::JoinHandle, time::Instant};
 use tracing::{debug, info, Level};
 
 #[derive(Parser)]
@@ -66,8 +67,22 @@ async fn main() -> Result<()> {
 
     info!("Staring main loop");
 
+    // TODO: Base `is_running` on actual container state
+    let is_running = true;
+
+    fn suspend_container() {
+        debug!("Suspending container");
+        // TODO: Actually suspend container
+    }
+
+    fn start_container() {
+        debug!("Starting container");
+        // TODO: Actually start container
+    }
+
     let mut packet_count: u128 = 0;
     let mut interval = tokio::time::interval(args.rate.into());
+    let mut join_handle: Option<(JoinHandle<()>, Instant)> = None;
     loop {
         interval.tick().await;
 
@@ -80,11 +95,49 @@ async fn main() -> Result<()> {
         info!("Received {} packets in last {}", delta, args.rate);
 
         if delta > args.threshold as u128 {
-            debug!("Threshold hit");
-            // TODO: Cancel suspension of container or start it
+            info!("Threshold hit");
+
+            if let Some((handle, _)) = &join_handle {
+                info!("Aborting suspension");
+                handle.abort();
+                join_handle = None;
+            }
+
+            if !is_running {
+                start_container()
+            }
         } else {
-            debug!("Threshold missed");
-            // TODO: Schedule suspension of container in {args.timeout}
+            if is_running {
+                if let Some((handle, suspension_started_at)) = &join_handle {
+                    if !handle.is_finished() {
+                        if let Some(timeout) = args.timeout {
+                            let time_until_suspension =
+                                (*suspension_started_at + timeout.into()) - Instant::now();
+
+                            info!(
+                                "Threshold missed, suspension scheduled in {} seconds",
+                                time_until_suspension.as_secs()
+                            );
+                        }
+                    } else {
+                        join_handle = None;
+                    }
+                } else {
+                    if let Some(timeout) = args.timeout {
+                        info!("Threshold missed. Scheduling suspension in {}", timeout);
+
+                        let handle = tokio::spawn(async move {
+                            tokio::time::sleep(timeout.into()).await;
+                            suspend_container()
+                        });
+
+                        join_handle = Some((handle, Instant::now()))
+                    } else {
+                        info!("Threshold missed. Suspending container");
+                        suspend_container()
+                    }
+                }
+            }
         }
     }
 }
