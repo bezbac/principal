@@ -3,7 +3,7 @@ version: "3"
 services:
   principal:
     container_name: principal
-    command: --port 8080 --threshold 10 --rate 1s --timeout 10s --container http-echo --debug
+    command: --port 8080 --threshold 10 --rate 10s --timeout 60s --container http-echo --debug
     build:
       context: ../../
     ports:
