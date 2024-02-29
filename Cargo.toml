@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 bollard = "0.15.0"
 clap = { version = "4.5.1", features = ["derive", "env"] }
@@ -13,4 +14,3 @@ duration-string = "0.3.0"
 pcap = "1.2.0"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
-tracing-subscriber = "0.3.18"

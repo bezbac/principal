@@ -9,7 +9,8 @@ use clap::Parser;
 use duration_string::DurationString;
 use pcap::Device;
 use tokio::time::Instant;
-use tracing::{debug, info, warn, Level};
+use tracing::{debug, info, level_filters::LevelFilter, warn};
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(version, about = "Suspend docker containers when they're not used", long_about = None)]
@@ -47,14 +48,25 @@ async fn main() -> Result<()> {
 
     // Setup tracing subscriber
 
-    let tracing_level = match args.debug {
-        true => Level::DEBUG,
-        false => Level::INFO,
-    };
+    let filter = EnvFilter::try_from_default_env().unwrap_or(
+        EnvFilter::default()
+            // Set the base level when not matched by other directives to WARN.
+            .add_directive(LevelFilter::WARN.into())
+            // Set the level for the this program accroding to the debug arg
+            .add_directive(
+                format!(
+                    "{}={}",
+                    env!("CARGO_PKG_NAME"),
+                    match args.debug {
+                        true => "debug",
+                        false => "info",
+                    }
+                )
+                .parse()?,
+            ),
+    );
 
-    let collector = tracing_subscriber::fmt()
-        .with_max_level(tracing_level)
-        .finish();
+    let collector = tracing_subscriber::fmt().with_env_filter(filter).finish();
 
     tracing::subscriber::set_global_default(collector)?;
 
