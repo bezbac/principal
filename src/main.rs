@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
         EnvFilter::default()
             // Set the base level when not matched by other directives to WARN.
             .add_directive(LevelFilter::WARN.into())
-            // Set the level for the this program accroding to the debug arg
+            // Set the level for the this program according to the debug arg
             .add_directive(
                 format!(
                     "{}={}",
@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
 
     tracing::subscriber::set_global_default(collector)?;
 
-    // Connect to docker deamon
+    // Connect to docker daemon
 
     let docker = Docker::connect_with_socket_defaults()?;
     let docker = Arc::new(docker);
