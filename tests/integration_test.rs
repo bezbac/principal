@@ -30,7 +30,7 @@ async fn wait_for_log_output(
         ..Default::default()
     });
 
-    let mut http_echo_logs = docker.logs(&container_name, options);
+    let mut http_echo_logs = docker.logs(container_name, options);
 
     while let Some(Ok(log)) = http_echo_logs.next().await {
         let bytes = &log.into_bytes();
@@ -59,14 +59,13 @@ async fn get_container_state(docker: &Docker, container_name: &str) -> Result<Op
         Some(names) => {
             return names
                 .iter()
-                .any(|name| name == &format!("/{}", container_name))
+                .any(|name| name == &format!("/{container_name}"))
         }
-        None => return false,
+        None => false,
     });
 
     let state = container_summary
-        .map(|container_summary| container_summary.state.as_ref())
-        .flatten()
+        .and_then(|container_summary| container_summary.state.as_ref())
         .map(|s| s.to_string());
 
     Ok(state)
@@ -98,8 +97,8 @@ async fn integration_test() -> Result<()> {
     let docker = Docker::connect_with_socket_defaults()?;
 
     let id = nanoid!();
-    let principal_container_name = format!("principal-{}", id);
-    let http_echo_container_name = format!("http-echo-{}", id);
+    let principal_container_name = format!("principal-{id}");
+    let http_echo_container_name = format!("http-echo-{id}");
 
     let principal_options = Some(CreateContainerOptions {
         name: &principal_container_name,
@@ -117,10 +116,8 @@ async fn integration_test() -> Result<()> {
         }]),
     );
 
-    let empty = HashMap::<(), ()>::new();
     let mut exposed_ports = HashMap::new();
-    let exposed_port = format!("8080/tcp");
-    exposed_ports.insert(exposed_port.as_str(), empty);
+    exposed_ports.insert("8080/tcp", HashMap::<(), ()>::new());
 
     let principal_config = Config {
         image: Some("principal:test"),
@@ -161,7 +158,7 @@ async fn integration_test() -> Result<()> {
         image: Some("hashicorp/http-echo"),
         cmd: Some(vec!["-listen=:8080", "-text='hello world'"]),
         host_config: Some(HostConfig {
-            network_mode: Some(format!("container:{}", &principal_container_name)),
+            network_mode: Some(format!("container:{principal_container_name}")),
             ..Default::default()
         }),
         ..Default::default()

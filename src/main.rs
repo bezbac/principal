@@ -42,6 +42,57 @@ struct Args {
     container: String,
 }
 
+async fn suspend_container(docker: &Docker, container_name: &str) {
+    debug!("Suspending container");
+    let res = docker.stop_container(container_name, None).await;
+    match res {
+        Ok(()) => info!("Container suspended"),
+        Err(e) => info!("Failed to suspend container: {}", e),
+    }
+}
+
+async fn start_container(docker: &Docker, container_name: &str) {
+    debug!("Starting container");
+    let res = docker
+        .start_container(container_name, None::<StartContainerOptions<&str>>)
+        .await;
+    match res {
+        Ok(()) => info!("Container started"),
+        Err(e) => info!("Failed to start container: {}", e),
+    }
+}
+
+async fn check_if_running(docker: &Docker, container_name: &str) -> Result<Option<bool>> {
+    let mut filters = HashMap::new();
+    filters.insert("name", vec![container_name]);
+
+    let opts = ListContainersOptions {
+        all: true,
+        limit: None,
+        size: false,
+        filters,
+    };
+
+    let containers = docker.list_containers(Some(opts)).await?;
+
+    let container_summary = containers.iter().find(|c| match &c.names {
+        Some(names) => names
+            .iter()
+            .any(|name| name == &format!("/{container_name}")),
+        None => false,
+    });
+
+    let is_running = container_summary
+        .and_then(|container_summary| container_summary.state.as_ref())
+        .map(|container_state| {
+            container_state == "created"
+                || container_state == "running"
+                || container_state == "restarting"
+        });
+
+    Ok(is_running)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -57,10 +108,7 @@ async fn main() -> Result<()> {
                 format!(
                     "{}={}",
                     env!("CARGO_PKG_NAME"),
-                    match args.debug {
-                        true => "debug",
-                        false => "info",
-                    }
+                    if args.debug { "debug" } else { "info" }
                 )
                 .parse()?,
             ),
@@ -82,67 +130,13 @@ async fn main() -> Result<()> {
     cap.direction(pcap::Direction::In)?;
 
     if let Some(port) = args.port {
-        let filter = format!("port {}", port);
+        let filter = format!("port {port}");
         cap.filter(&filter, true)?;
     }
 
     // Setup main loop
 
     info!("Staring main loop");
-
-    async fn check_if_running(docker: &Docker, container_name: &str) -> Result<Option<bool>> {
-        let mut filters = HashMap::new();
-        filters.insert("name", vec![container_name]);
-
-        let opts = ListContainersOptions {
-            all: true,
-            limit: None,
-            size: false,
-            filters,
-        };
-
-        let containers = docker.list_containers(Some(opts)).await?;
-
-        let container_summary = containers.iter().find(|c| match &c.names {
-            Some(names) => {
-                return names
-                    .iter()
-                    .any(|name| name == &format!("/{}", container_name))
-            }
-            None => return false,
-        });
-
-        let is_running = container_summary
-            .map(|container_summary| container_summary.state.as_ref())
-            .flatten()
-            .map(|container_state| {
-                container_state == "created"
-                    || container_state == "running"
-                    || container_state == "restarting"
-            });
-
-        Ok(is_running)
-    }
-
-    async fn suspend_container(docker: &Docker, container_name: &str) {
-        debug!("Suspending container");
-        let res = docker.stop_container(&container_name, None).await;
-        match res {
-            Ok(_) => info!("Container suspended"),
-            Err(e) => info!("Failed to suspend container: {}", e),
-        }
-    }
-
-    async fn start_container(docker: &Docker, container_name: &str) {
-        debug!("Starting container");
-        let res = docker
-            .start_container(&container_name, None::<StartContainerOptions<&str>>)
-            .await;
-        match res {
-            Ok(_) => info!("Container started"),
-            Err(e) => info!("Failed to start container: {}", e),
-        }
-    }
 
     let mut packet_count: u128 = 0;
     let mut interval = tokio::time::interval(args.rate.into());
@@ -152,21 +146,18 @@ async fn main() -> Result<()> {
 
         let stats = cap.stats()?;
 
-        let new_packet_count: u128 = stats.received.try_into()?;
+        let new_packet_count: u128 = stats.received.into();
         let delta = new_packet_count - packet_count;
         packet_count = new_packet_count;
 
         info!("Received {} packets in last {}", delta, &args.rate);
 
-        let is_running = match check_if_running(&docker, &args.container).await? {
-            Some(is_running) => is_running,
-            None => {
-                warn!(
-                    "Failed to check if container {} is running",
-                    &args.container
-                );
-                continue;
-            }
+        let Some(is_running) = check_if_running(&docker, &args.container).await? else {
+            warn!(
+                "Failed to check if container {} is running",
+                &args.container
+            );
+            continue;
         };
 
         if delta > args.threshold as u128 {
@@ -182,41 +173,42 @@ async fn main() -> Result<()> {
                 start_container(&docker, &args.container).await;
             }
         } else {
-            if is_running {
-                if let Some((handle, suspension_started_at)) = &join_handle {
-                    if !handle.is_finished() {
-                        if let Some(timeout) = args.timeout {
-                            let time_until_suspension =
-                                (*suspension_started_at + timeout.into()) - Instant::now();
+            if !is_running {
+                continue;
+            }
 
-                            info!(
-                                "Threshold missed, suspension scheduled in {} seconds",
-                                time_until_suspension.as_secs()
-                            );
-                        }
-                    } else {
-                        join_handle = None;
-                    }
-                } else {
-                    if let Some(timeout) = args.timeout {
-                        info!("Threshold missed. Scheduling suspension in {}", timeout);
-
-                        let docker = docker.clone();
-                        let container_name = args.container.clone();
-
-                        let handle = tokio::spawn(async move {
-                            tokio::time::sleep(timeout.into()).await;
-                            let _ = suspend_container(&docker, &container_name).await;
-                        });
-
-                        let handle = handle.abort_handle();
-
-                        join_handle = Some((handle, Instant::now()))
-                    } else {
-                        info!("Threshold missed. Suspending container");
-                        suspend_container(&docker, &args.container).await;
-                    }
+            if let Some((handle, suspension_started_at)) = &join_handle {
+                if handle.is_finished() {
+                    join_handle = None;
+                    continue;
                 }
+
+                if let Some(timeout) = args.timeout {
+                    let time_until_suspension =
+                        (*suspension_started_at + timeout.into()) - Instant::now();
+
+                    info!(
+                        "Threshold missed, suspension scheduled in {} seconds",
+                        time_until_suspension.as_secs()
+                    );
+                }
+            } else if let Some(timeout) = args.timeout {
+                info!("Threshold missed. Scheduling suspension in {}", timeout);
+
+                let docker = docker.clone();
+                let container_name = args.container.clone();
+
+                let handle = tokio::spawn(async move {
+                    tokio::time::sleep(timeout.into()).await;
+                    let () = suspend_container(&docker, &container_name).await;
+                });
+
+                let handle = handle.abort_handle();
+
+                join_handle = Some((handle, Instant::now()));
+            } else {
+                info!("Threshold missed. Suspending container");
+                suspend_container(&docker, &args.container).await;
             }
         }
     }
