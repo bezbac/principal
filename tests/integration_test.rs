@@ -195,7 +195,7 @@ async fn integration_test() -> Result<()> {
 
     println!("Wait for principal to be ready");
     wait_for_log_output(&docker, &http_echo_container_name, &|message| {
-        message.contains("Staring main loop")
+        message.contains("Starting main loop")
     })
     .await;
 

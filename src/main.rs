@@ -136,7 +136,7 @@ async fn main() -> Result<()> {
 
     // Setup main loop
 
-    info!("Staring main loop");
+    info!("Starting main loop");
 
     let mut packet_count: u128 = 0;
     let mut interval = tokio::time::interval(args.rate.into());
