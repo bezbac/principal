@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use bollard::{
     container::{
         Config, CreateContainerOptions, ListContainersOptions, LogsOptions, StartContainerOptions,
@@ -17,6 +17,7 @@ use bollard::{
 use futures_util::stream::StreamExt;
 use nanoid::nanoid;
 use tokio::time::sleep;
+use tokio_postgres::NoTls;
 
 async fn has_log_output(
     docker: &Docker,
@@ -87,28 +88,39 @@ async fn get_container_state(docker: &Docker, container_name: &str) -> Result<Op
     Ok(state)
 }
 
+use std::sync::Once;
+
+static BUILD: Once = Once::new();
+
+pub fn initialize() {
+    BUILD.call_once(|| {
+        let cwd = env!("CARGO_MANIFEST_DIR");
+
+        println!("Building docker image");
+        let mut cmd = Command::new("docker")
+            .arg("build")
+            .arg("--file")
+            .arg(&format!("{cwd}/Dockerfile"))
+            .arg("--force-rm")
+            .arg("--tag")
+            .arg("principal:test")
+            .arg(".")
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+
+        if !cmd.wait().unwrap().success() {
+            panic!("Unable to build image");
+        }
+
+        println!("Successfully built image");
+    });
+}
+
 #[tokio::test]
-async fn integration_test() -> Result<()> {
-    let cwd = env!("CARGO_MANIFEST_DIR");
-
-    println!("Building docker image");
-    let mut cmd = Command::new("docker")
-        .arg("build")
-        .arg("--file")
-        .arg(&format!("{cwd}/Dockerfile"))
-        .arg("--force-rm")
-        .arg("--tag")
-        .arg("principal:test")
-        .arg(".")
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()?;
-
-    if !cmd.wait()?.success() {
-        bail!("Unable to build image");
-    }
-
-    println!("Successfully built image");
+async fn integration_test_threshold() -> Result<()> {
+    initialize();
 
     let docker = Docker::connect_with_socket_defaults()?;
 
@@ -142,6 +154,8 @@ async fn integration_test() -> Result<()> {
             "8080",
             "--threshold",
             "10",
+            "--preserve-connection",
+            "false",
             "--rate",
             "1s",
             "--timeout",
@@ -180,13 +194,10 @@ async fn integration_test() -> Result<()> {
         ..Default::default()
     };
 
-    {
-        println!("Create principal container");
-
-        docker
-            .create_container(principal_options, principal_config)
-            .await?;
-    }
+    println!("Create principal container");
+    docker
+        .create_container(principal_options, principal_config)
+        .await?;
 
     println!("Create http-echo container");
     docker
@@ -301,6 +312,194 @@ async fn integration_test() -> Result<()> {
     println!("Remove http-echo container");
     docker
         .remove_container(&http_echo_container_name, None)
+        .await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_test_preserve_connection() -> Result<()> {
+    initialize();
+
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let id = nanoid!();
+    let principal_container_name = format!("principal-{id}");
+    let postgres_container_name = format!("postgres-{id}");
+
+    let principal_options = Some(CreateContainerOptions {
+        name: &principal_container_name,
+        platform: None,
+    });
+
+    // TODO: Randomize host port instead of hardcoding 5432
+
+    let mut principal_port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
+    principal_port_bindings.insert(
+        "5432/tcp".to_string(),
+        Some(vec![PortBinding {
+            host_port: Some("5432".to_string()),
+            host_ip: Some("127.0.0.1".to_string()),
+        }]),
+    );
+
+    let mut exposed_ports = HashMap::new();
+    exposed_ports.insert("5432/tcp", HashMap::<(), ()>::new());
+
+    let principal_config = Config {
+        image: Some("principal:test"),
+        cmd: Some(vec![
+            "--port",
+            "5432",
+            "--threshold",
+            "1000000",
+            "--preserve-connection",
+            "true",
+            "--rate",
+            "1s",
+            "--timeout",
+            "5s",
+            "--container",
+            &postgres_container_name,
+        ]),
+        exposed_ports: Some(exposed_ports),
+        host_config: Some(HostConfig {
+            port_bindings: Some(principal_port_bindings),
+            mounts: Some(vec![Mount {
+                target: Some("/var/run/docker.sock".to_string()),
+                source: Some("/var/run/docker.sock".to_string()),
+                typ: Some(MountTypeEnum::BIND),
+                consistency: Some(String::from("default")),
+                read_only: Some(true),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let postgres_options = Some(CreateContainerOptions {
+        name: &postgres_container_name,
+        platform: None,
+    });
+
+    let postgres_password = "example";
+    let mut postgres_env: Vec<&str> = vec![];
+    let password_env = format!("POSTGRES_PASSWORD={postgres_password}");
+    postgres_env.push(&password_env);
+
+    let postgres_config = Config {
+        image: Some("postgres"),
+        env: Some(postgres_env),
+        host_config: Some(HostConfig {
+            network_mode: Some(format!("container:{principal_container_name}")),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    println!("Create principal container");
+    docker
+        .create_container(principal_options, principal_config)
+        .await?;
+
+    println!("Create postgres container");
+    docker
+        .create_container(postgres_options, postgres_config)
+        .await?;
+
+    println!("Start principal container");
+    docker
+        .start_container(
+            &principal_container_name,
+            None::<StartContainerOptions<&str>>,
+        )
+        .await?;
+
+    println!("Start postgres container");
+    docker
+        .start_container(
+            &postgres_container_name,
+            None::<StartContainerOptions<&str>>,
+        )
+        .await?;
+
+    println!("Wait for principal to be ready");
+    wait_for_log_output(
+        &docker,
+        &principal_container_name,
+        &|message| message.contains("Starting main loop"),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    println!("Wait for postgres to be ready");
+    wait_for_log_output(
+        &docker,
+        &postgres_container_name,
+        &|message| message.contains("database system is ready to accept connections"),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    println!("Connecting to postgres");
+    let mut conn_config = tokio_postgres::Config::new();
+    conn_config.host("localhost");
+    conn_config.port(5432);
+    conn_config.user("postgres");
+    conn_config.password(postgres_password);
+    let (client, connection) = conn_config.connect(NoTls).await?;
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+
+    println!("Run a simple SQL query");
+    let rows = client.query("SELECT $1::TEXT", &[&"hello world"]).await?;
+    assert_eq!(rows.len(), 1);
+    let value: &str = rows[0].get(0);
+    assert_eq!(value, "hello world");
+
+    println!("Wait for 10 seconds");
+    sleep(Duration::from_secs(10)).await;
+
+    println!("Expect container to be running");
+    let container_state = get_container_state(&docker, &postgres_container_name).await?;
+    assert_eq!(container_state, Some("running".to_string()));
+
+    println!("Close the connection");
+    drop(client);
+
+    println!("Wait for 10 seconds");
+    sleep(Duration::from_secs(10)).await;
+
+    println!("Expect container to be suspended");
+    let container_state = get_container_state(&docker, &postgres_container_name).await?;
+    assert_eq!(container_state, Some("exited".to_string()));
+
+    // TODO: Always execute the cleanup
+
+    println!("Stop principal container");
+    let options = Some(StopContainerOptions { t: 10 });
+    docker
+        .stop_container(&principal_container_name, options)
+        .await?;
+
+    println!("Stop postgres container");
+    let options = Some(StopContainerOptions { t: 10 });
+    docker
+        .stop_container(&postgres_container_name, options)
+        .await?;
+
+    println!("Remove principal container");
+    docker
+        .remove_container(&principal_container_name, None)
+        .await?;
+
+    println!("Remove postgres container");
+    docker
+        .remove_container(&postgres_container_name, None)
         .await?;
 
     Ok(())
