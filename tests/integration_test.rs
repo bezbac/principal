@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     env,
     process::{Command, Stdio},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{bail, Result};
@@ -18,12 +18,11 @@ use futures_util::stream::StreamExt;
 use nanoid::nanoid;
 use tokio::time::sleep;
 
-// TODO: Add a timeout here
-async fn wait_for_log_output(
+async fn has_log_output(
     docker: &Docker,
     container_name: &str,
     predicate: &dyn Fn(&str) -> bool,
-) {
+) -> bool {
     let options = Some(LogsOptions::<String> {
         stdout: true,
         stderr: true,
@@ -37,7 +36,24 @@ async fn wait_for_log_output(
         let message = std::str::from_utf8(bytes).unwrap();
 
         if predicate(message) {
-            break;
+            return true;
+        }
+    }
+
+    false
+}
+
+async fn wait_for_log_output(
+    docker: &Docker,
+    container_name: &str,
+    predicate: &dyn Fn(&str) -> bool,
+    timeout: Duration,
+) {
+    let start = Instant::now();
+    while !has_log_output(docker, container_name, predicate).await {
+        sleep(Duration::from_secs(1)).await;
+        if start.elapsed() > timeout {
+            panic!("Timed out waiting for log output");
         }
     }
 }
@@ -194,15 +210,21 @@ async fn integration_test() -> Result<()> {
         .await?;
 
     println!("Wait for principal to be ready");
-    wait_for_log_output(&docker, &http_echo_container_name, &|message| {
-        message.contains("Starting main loop")
-    })
+    wait_for_log_output(
+        &docker,
+        &principal_container_name,
+        &|message| message.contains("Starting main loop"),
+        Duration::from_secs(5),
+    )
     .await;
 
     println!("Wait for http-echo to be ready");
-    wait_for_log_output(&docker, &http_echo_container_name, &|message| {
-        message.contains("server is listening on")
-    })
+    wait_for_log_output(
+        &docker,
+        &http_echo_container_name,
+        &|message| message.contains("server is listening on"),
+        Duration::from_secs(5),
+    )
     .await;
 
     println!("Send request to http-echo & check response");
@@ -210,9 +232,12 @@ async fn integration_test() -> Result<()> {
     assert_eq!(resp, "'hello world'\n");
 
     println!("Wait for suspension to be initiated");
-    wait_for_log_output(&docker, &http_echo_container_name, &|message| {
-        message.contains("Threshold missed. Scheduling suspension in 10s")
-    })
+    wait_for_log_output(
+        &docker,
+        &principal_container_name,
+        &|message| message.contains("Threshold missed. Scheduling suspension in 5s"),
+        Duration::from_secs(5),
+    )
     .await;
 
     println!("Wait for container to be suspended");
