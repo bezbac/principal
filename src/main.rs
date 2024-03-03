@@ -5,8 +5,9 @@ use bollard::{
     container::{ListContainersOptions, StartContainerOptions},
     Docker,
 };
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use duration_string::DurationString;
+use netstat2::{get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState};
 use pcap::Device;
 use tokio::time::Instant;
 use tracing::{debug, info, level_filters::LevelFilter, warn};
@@ -36,6 +37,16 @@ struct Args {
     /// interval to be considered active
     #[arg(long, default_value = "30")]
     threshold: usize,
+
+    /// Should the threshold be ignored if there is an
+    /// open connection to the network socket
+    #[arg(
+        long,
+        default_missing_value("true"),
+        default_value("true"),
+        action = ArgAction::Set
+    )]
+    preserve_connection: bool,
 
     /// Which container should be controlled
     #[arg(long)]
@@ -93,6 +104,25 @@ async fn check_if_running(docker: &Docker, container_name: &str) -> Result<Optio
     Ok(is_running)
 }
 
+fn has_socket_active_connection(port: usize) -> Result<bool> {
+    let infos = get_sockets_info(
+        AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6,
+        ProtocolFlags::TCP,
+    )?;
+
+    let has_connection = infos
+        .iter()
+        .filter_map(|info| match &info.protocol_socket_info {
+            ProtocolSocketInfo::Tcp(tcp_si) => Some(tcp_si),
+            ProtocolSocketInfo::Udp(_) => None,
+        })
+        .any(|tcp_info| {
+            tcp_info.local_port as usize == port && tcp_info.state == TcpState::Established
+        });
+
+    Ok(has_connection)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -144,13 +174,29 @@ async fn main() -> Result<()> {
     loop {
         interval.tick().await;
 
-        let stats = cap.stats()?;
+        let mut should_be_alive: Option<bool> = None;
 
-        let new_packet_count: u128 = stats.received.into();
-        let delta = new_packet_count - packet_count;
-        packet_count = new_packet_count;
+        if let Some(port) = args.port {
+            let has_connection = has_socket_active_connection(port)?;
+            if has_connection {
+                info!("Socket has an active connection");
+                should_be_alive = Some(true);
+            }
+        }
 
-        info!("Received {} packets in last {}", delta, &args.rate);
+        if should_be_alive.is_none() {
+            let stats = cap.stats()?;
+
+            let new_packet_count: u128 = stats.received.into();
+            let delta = new_packet_count - packet_count;
+            packet_count = new_packet_count;
+
+            info!("Received {} packets in last {}", delta, &args.rate);
+
+            should_be_alive = Some(delta > args.threshold as u128);
+        }
+
+        let should_be_alive = should_be_alive.unwrap();
 
         let Some(is_running) = check_if_running(&docker, &args.container).await? else {
             warn!(
@@ -160,7 +206,7 @@ async fn main() -> Result<()> {
             continue;
         };
 
-        if delta > args.threshold as u128 {
+        if should_be_alive {
             info!("Threshold hit");
 
             if let Some((handle, _)) = &join_handle {
