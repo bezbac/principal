@@ -174,6 +174,13 @@ async fn main() -> Result<()> {
     loop {
         interval.tick().await;
 
+        let stats = cap.stats()?;
+        let new_packet_count: u128 = stats.received.into();
+        let delta = new_packet_count - packet_count;
+        packet_count = new_packet_count;
+
+        info!("Received {} packets in last {}", delta, &args.rate);
+
         let mut should_be_alive: Option<bool> = None;
 
         if let Some(port) = args.port {
@@ -184,19 +191,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        if should_be_alive.is_none() {
-            let stats = cap.stats()?;
-
-            let new_packet_count: u128 = stats.received.into();
-            let delta = new_packet_count - packet_count;
-            packet_count = new_packet_count;
-
-            info!("Received {} packets in last {}", delta, &args.rate);
-
-            should_be_alive = Some(delta > args.threshold as u128);
-        }
-
-        let should_be_alive = should_be_alive.unwrap();
+        let should_be_alive = should_be_alive.unwrap_or(delta > args.threshold as u128);
 
         let Some(is_running) = check_if_running(&docker, &args.container).await? else {
             warn!(

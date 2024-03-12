@@ -456,13 +456,54 @@ async fn integration_test_preserve_connection() -> Result<()> {
     });
 
     println!("Run a simple SQL query");
-    let rows = client.query("SELECT $1::TEXT", &[&"hello world"]).await?;
-    assert_eq!(rows.len(), 1);
-    let value: &str = rows[0].get(0);
-    assert_eq!(value, "hello world");
 
-    println!("Wait for 10 seconds");
-    sleep(Duration::from_secs(10)).await;
+    for i in 0..100 {
+        let message = format!("Hello {i}");
+        let rows = client.query("SELECT $1::TEXT", &[&message]).await?;
+        assert_eq!(rows.len(), 1);
+        let value: &str = rows[0].get(0);
+        assert_eq!(value, message);
+    }
+
+    sleep(Duration::from_secs(5)).await;
+
+    let packet_counts = docker
+        .logs(
+            &principal_container_name,
+            Some(LogsOptions::<String> {
+                stdout: true,
+                stderr: true,
+                ..Default::default()
+            }),
+        )
+        .filter_map(|log| async move { log.ok() })
+        .filter_map(|log| async move {
+            let bytes = &log.into_bytes();
+            let message = std::str::from_utf8(bytes).unwrap();
+            let parts = message.split("Received ").collect::<Vec<&str>>();
+            if parts.len() < 2 {
+                return None;
+            }
+            let parts = parts[1].split(" ").collect::<Vec<&str>>();
+            if parts.len() < 1 {
+                return None;
+            }
+            parts[0].parse::<usize>().ok()
+        })
+        .collect::<Vec<usize>>()
+        .await;
+
+    println!("Expect a log with >100 packets received");
+    assert!(packet_counts.iter().any(|&packet_count| packet_count > 100));
+
+    println!("Send a query every 2 seconds for 10 seconds");
+    for _ in 0..5 {
+        sleep(Duration::from_secs(2)).await;
+        let rows = client.query("SELECT $1::TEXT", &[&"hello world"]).await?;
+        assert_eq!(rows.len(), 1);
+        let value: &str = rows[0].get(0);
+        assert_eq!(value, "hello world");
+    }
 
     println!("Expect container to be running");
     let container_state = get_container_state(&docker, &postgres_container_name).await?;
@@ -473,6 +514,38 @@ async fn integration_test_preserve_connection() -> Result<()> {
 
     println!("Wait for 10 seconds");
     sleep(Duration::from_secs(10)).await;
+
+    let new_packet_counts = docker
+        .logs(
+            &principal_container_name,
+            Some(LogsOptions::<String> {
+                stdout: true,
+                stderr: true,
+                ..Default::default()
+            }),
+        )
+        .skip(packet_counts.len())
+        .filter_map(|log| async move { log.ok() })
+        .filter_map(|log| async move {
+            let bytes = &log.into_bytes();
+            let message = std::str::from_utf8(bytes).unwrap();
+            let parts = message.split("Received ").collect::<Vec<&str>>();
+            if parts.len() < 2 {
+                return None;
+            }
+            let parts = parts[1].split(" ").collect::<Vec<&str>>();
+            if parts.len() < 1 {
+                return None;
+            }
+            parts[0].parse::<usize>().ok()
+        })
+        .collect::<Vec<usize>>()
+        .await;
+
+    println!("Expect at least one log with >0 packets received, since last check");
+    assert!(new_packet_counts
+        .iter()
+        .any(|&packet_count| packet_count > 0));
 
     println!("Expect container to be suspended");
     let container_state = get_container_state(&docker, &postgres_container_name).await?;
