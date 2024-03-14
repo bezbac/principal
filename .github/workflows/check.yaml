@@ -1,0 +1,23 @@
+name: "Check"
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - flake.nix
+      - .github/workflows/check.yaml
+
+jobs:
+  check-flake-fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v17
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Format flake.nix
+        run: nix run nixpkgs#nixpkgs-fmt -- flake.nix --check
