@@ -4,8 +4,7 @@ services:
   principal:
     container_name: principal
     command: --port 8080 --threshold 10 --rate 10s --timeout 60s --container http-echo --debug
-    build:
-      context: ../../
+    image: principal:latest
     ports:
       - 8080:8080
     volumes:
