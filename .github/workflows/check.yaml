@@ -3,9 +3,6 @@ name: "Check"
 on:
   workflow_dispatch:
   push:
-    paths:
-      - flake.nix
-      - .github/workflows/check.yaml
 
 jobs:
   check-nix:
