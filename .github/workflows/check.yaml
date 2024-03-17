@@ -8,7 +8,7 @@ on:
       - .github/workflows/check.yaml
 
 jobs:
-  check-flake-fmt:
+  check-nix:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -21,3 +21,19 @@ jobs:
 
       - name: Format flake.nix
         run: nix run nixpkgs#nixpkgs-fmt -- flake.nix --check
+
+  check-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: rustfmt --check
+
+      - name: Check clippy
+        run: cargo clippy -- -Dclippy::all -Dclippy::pedanti
