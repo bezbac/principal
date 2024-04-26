@@ -1,6 +1,18 @@
-# Principal
+<br />
+<br />
+<p align="center">
+  <img src="logo.png" alt="Principal Logo" width="196" height="196">
 
-_Suspend your Docker containers while they are not in use._
+  <h3 align="center">Principal</h3>
+
+  <p align="center">
+    Suspend your Docker containers while they are not in use.
+  </p>
+</p>
+<br />
+<br />
+
+## About
 
 Principal monitors network traffic to your containers and automatically starts or stops them when they are (not) needed.
 
